@@ -1,0 +1,3 @@
+rootProject.name = "MyScreenCaster"
+include ':app'
+
