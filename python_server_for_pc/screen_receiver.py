@@ -3,6 +3,7 @@ import struct
 import sys
 import io
 import av
+import select
 from PIL import Image
 from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout
 from PyQt5.QtGui import QPixmap, QImage
@@ -23,55 +24,89 @@ class ScreenReceiver(QThread):
 
     def run(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((self.host, self.port))
         server.listen(1)
+        server.setblocking(False) 
         print(f"Listening on {self.host}:{self.port}...")
 
-        conn, addr = server.accept()
-        print(f"Connection from {addr}")
-
         while self.running:
-            length_data = self.recvall(conn, 4)
-            if not length_data:
-                break
-            length = struct.unpack('>I', length_data)[0]
+            try:
+                ready_to_read, _, _ = select.select([server], [], [], 0.5)
+                if ready_to_read:
+                    conn, addr = server.accept()
+                    self.conn = conn
+                    print(f"Connection from {addr}")
 
-            data = self.recvall(conn, length)
-            if not data:
-                break
+                    self.decoder = av.codec.CodecContext.create('h264', 'r')
+                    self.got_extradata = False
+                    self.sps_pps = b''
 
-            if not self.got_extradata:
-                self.sps_pps += data
-                if len(self.sps_pps) >= 2:
-                    self.decoder.extradata = self.sps_pps
-                    self.decoder.open()
-                    self.got_extradata = True
-                continue
+                    while self.running:
+                        length_data = self.recvall(conn, 4)
+                        if not length_data:
+                            break
+                        length = struct.unpack('>I', length_data)[0]
 
-            packet = av.Packet(data)
-            frames = self.decoder.decode(packet)
-            for frame in frames:
-                img = frame.to_image().convert("RGBA")
-                raw = img.tobytes("raw", "RGBA")
-                qimage = QImage(raw, frame.width, frame.height, QImage.Format_RGBA8888)
-                self.image_received.emit(qimage)
+                        data = self.recvall(conn, length)
+                        if not data:
+                            break
 
-        conn.close()
-        server.close()
+                        if not self.got_extradata:
+                            self.sps_pps += data
+                            if len(self.sps_pps) >= 2:
+                                self.decoder.extradata = self.sps_pps
+                                self.decoder.open()
+                                self.got_extradata = True
+                            continue
+
+                        packet = av.Packet(data)
+                        frames = self.decoder.decode(packet)
+                        for frame in frames:
+                            img = frame.to_image().convert("RGBA")
+                            raw = img.tobytes("raw", "RGBA")
+                            qimage = QImage(raw, frame.width, frame.height, QImage.Format_RGBA8888)
+                            self.image_received.emit(qimage)
+
+                    try:
+                        conn.close()
+                    except:
+                        pass
+            except Exception as e:
+                print(f"Connection error: {e}")
+
+        print("Exiting receiver thread...")
+        try:
+            server.close()
+        except:
+            pass
 
     def recvall(self, sock, n):
         data = b''
-        while len(data) < n:
-            packet = sock.recv(n - len(data))
-            print(f"recv got {len(packet) if packet else 0} bytes")  # debug
-            if not packet:
-                return None
-            data += packet
-        return data
-
+        while len(data) < n and self.running:
+            ready = select.select([sock], [], [], 0.5)
+            if ready[0]:
+                packet = sock.recv(n - len(data))
+                if not packet:
+                    return None
+                data += packet
+        return data if self.running else None
 
     def stop(self):
         self.running = False
+        try:
+            if getattr(self, 'conn', None):
+                try:
+                    self.conn.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+                self.conn = None
+        except Exception as e:
+            print(f"Connection close failed: {e}")
         self.wait()
 
 

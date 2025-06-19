@@ -89,7 +89,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startProjection() {
-    
+        if (mediaProjection != null) {
+            stopStreaming();
+        }
         Intent intent = projectionManager.createScreenCaptureIntent();
         startActivityForResult(intent, REQUEST_CODE);
     }
@@ -267,15 +269,7 @@ private void startStreaming() {
 
     private void stopStreaming() {
         streaming = false;
-        runOnUiThread(() -> btnStream.setText("Start"));
-        if (mediaProjection != null) {
-            mediaProjection.stop();
-            mediaProjection = null;
-        }
-        if (virtualDisplay != null) {
-            virtualDisplay.release();
-            virtualDisplay = null;
-        }
+
         if (streamingThread != null) {
             try {
                 streamingThread.join();
@@ -284,7 +278,52 @@ private void startStreaming() {
             }
             streamingThread = null;
         }
+
+        if (encoder != null) {
+            try {
+                encoder.stop();
+            } catch (Exception e) {
+                Log.e("ENCODER", "Stop failed: " + e.getMessage());
+            }
+            try {
+                encoder.release();
+            } catch (Exception e) {
+                Log.e("ENCODER", "Release failed: " + e.getMessage());
+            }
+            encoder = null;
+        }
+
+        if (inputSurface != null) {
+            inputSurface.release();
+            inputSurface = null;
+        }
+
+        if (virtualDisplay != null) {
+            virtualDisplay.release();
+            virtualDisplay = null;
+        }
+
+        if (mediaProjection != null) {
+            mediaProjection.stop();
+            mediaProjection = null;
+        }
+
+        try {
+            if (outputStream != null) {
+                outputStream.close();
+                outputStream = null;
+            }
+            if (socket != null) {
+                socket.close();
+                socket = null;
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        runOnUiThread(() -> btnStream.setText("Start"));
     }
+
 
     @Override
     protected void onDestroy() {
