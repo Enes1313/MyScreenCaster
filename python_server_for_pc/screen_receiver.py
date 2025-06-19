@@ -2,6 +2,7 @@ import socket
 import struct
 import sys
 import io
+import av
 from PIL import Image
 from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout
 from PyQt5.QtGui import QPixmap, QImage
@@ -16,6 +17,9 @@ class ScreenReceiver(QThread):
         self.host = host
         self.port = port
         self.running = True
+        self.decoder = av.codec.CodecContext.create('h264', 'r')
+        self.got_extradata = False
+        self.sps_pps = b''
 
     def run(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -36,17 +40,25 @@ class ScreenReceiver(QThread):
             if not data:
                 break
 
-            image = Image.open(io.BytesIO(data))
+            if not self.got_extradata:
+                self.sps_pps += data
+                if len(self.sps_pps) >= 2:
+                    self.decoder.extradata = self.sps_pps
+                    self.decoder.open()
+                    self.got_extradata = True
+                continue
 
-            image = image.convert("RGBA")
-            data = image.tobytes("raw", "RGBA")
-            qimage = QImage(data, image.width, image.height, QImage.Format_RGBA8888)
-
-            self.image_received.emit(qimage)
+            packet = av.Packet(data)
+            frames = self.decoder.decode(packet)
+            for frame in frames:
+                img = frame.to_image().convert("RGBA")
+                raw = img.tobytes("raw", "RGBA")
+                qimage = QImage(raw, frame.width, frame.height, QImage.Format_RGBA8888)
+                self.image_received.emit(qimage)
 
         conn.close()
         server.close()
-        
+
     def recvall(self, sock, n):
         data = b''
         while len(data) < n:

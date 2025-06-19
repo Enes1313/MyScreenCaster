@@ -2,9 +2,12 @@ package com.example.myscreencaster;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.graphics.Bitmap;
-import android.media.Image;
-import android.media.ImageReader;
+import android.util.Log;
+import android.util.Range;
+import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
+import android.media.MediaFormat;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.net.InetAddresses;
@@ -15,21 +18,9 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.Toast;
 import android.hardware.display.VirtualDisplay;
-import android.media.projection.MediaProjection;
-import android.media.projection.MediaProjectionManager;
-import android.os.Bundle;
 import androidx.appcompat.app.AppCompatActivity;
-import android.view.Surface;
-import android.widget.Button;
-import android.widget.EditText;
-import android.widget.Toast;
 import androidx.core.content.ContextCompat;
 
-
-import androidx.annotation.Nullable;
-import androidx.appcompat.app.AppCompatActivity;
-
-import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
@@ -40,8 +31,9 @@ public class MainActivity extends AppCompatActivity {
 
     private MediaProjectionManager projectionManager;
     private MediaProjection mediaProjection;
-    private ImageReader imageReader;
     private VirtualDisplay virtualDisplay;
+    private MediaCodec encoder;
+    private Surface inputSurface;
 
     private int screenWidth;
     private int screenHeight;
@@ -85,9 +77,8 @@ public class MainActivity extends AppCompatActivity {
                     return;
                 }
 
-                int port = Integer.parseInt(portStr);
-Intent serviceIntent = new Intent(this, ScreenCaptureService.class);
-ContextCompat.startForegroundService(this, serviceIntent);
+                Intent serviceIntent = new Intent(this, ScreenCaptureService.class);
+                ContextCompat.startForegroundService(this, serviceIntent);
 
                 startProjection();
 
@@ -104,10 +95,12 @@ ContextCompat.startForegroundService(this, serviceIntent);
     }
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_CODE) {
             if (resultCode == Activity.RESULT_OK && data != null) {
                 mediaProjection = projectionManager.getMediaProjection(resultCode, data);
+                setupEncoder();
                 setUpVirtualDisplay();
                 startStreaming();
                 btnStream.setText("Stop");
@@ -116,18 +109,16 @@ ContextCompat.startForegroundService(this, serviceIntent);
                 Toast.makeText(this, "Screen Cast Permission Denied", Toast.LENGTH_SHORT).show();
             }
         }
-        super.onActivityResult(requestCode, resultCode, data);
     }
 
     private void setUpVirtualDisplay() {
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, 0x1, 2); // PixelFormat RGBA_8888 = 0x1
         virtualDisplay = mediaProjection.createVirtualDisplay(
                 "ScreenCapture",
                 screenWidth,
                 screenHeight,
                 screenDensity,
                 0,
-                imageReader.getSurface(),
+                inputSurface,
                 null,
                 null
         );
@@ -142,45 +133,40 @@ private void startStreaming() {
             socket = new Socket(ip, port);
             outputStream = socket.getOutputStream();
 
-            Bitmap reusableBitmap = Bitmap.createBitmap(screenWidth, screenHeight, Bitmap.Config.ARGB_8888);
+            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+
+            MediaFormat outFormat = encoder.getOutputFormat(); // start() sonrası alınır
+            ByteBuffer csd0 = outFormat.getByteBuffer("csd-0");
+            ByteBuffer csd1 = outFormat.getByteBuffer("csd-1");
+
+            send(outputStream, csd0);
+            send(outputStream, csd1);
 
             while (streaming) {
-                Image image = imageReader.acquireLatestImage();
-                if (image == null) {
-                    Thread.sleep(5);
-                    continue;
+                int idx = encoder.dequeueOutputBuffer(info, 10000);
+                if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        // ignore, config already sent
+                } else if (idx >= 0) {
+                    ByteBuffer buff = encoder.getOutputBuffer(idx);
+                    if (buff != null) {
+                        send(outputStream, buff, info.size);
+                    }
+                    encoder.releaseOutputBuffer(idx, false);
                 }
-
-                Image.Plane[] planes = image.getPlanes();
-                ByteBuffer buffer = planes[0].getBuffer();
-                int pixelStride = planes[0].getPixelStride();
-                int rowStride = planes[0].getRowStride();
-                int rowPadding = rowStride - pixelStride * screenWidth;
-
-                Bitmap tempBitmap = Bitmap.createBitmap(
-                        screenWidth + rowPadding / pixelStride,
-                        screenHeight,
-                        Bitmap.Config.ARGB_8888);
-                tempBitmap.copyPixelsFromBuffer(buffer);
-                image.close();
-
-                Bitmap bitmap = Bitmap.createBitmap(tempBitmap, 0, 0, screenWidth, screenHeight);
-                tempBitmap.recycle();
-
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos); // JPEG = daha küçük ve hızlı
-                byte[] jpegBytes = baos.toByteArray();
-                bitmap.recycle();
-
-                outputStream.write(intToByteArray(jpegBytes.length));
-                outputStream.write(jpegBytes);
-                outputStream.flush();
-
-                Thread.sleep(16); // ~60 FPS hedefi
             }
 
-            outputStream.close();
-            socket.close();
+            try {
+                encoder.stop();
+            } catch (Exception e) {
+                Log.e("ENCODER", "Stop failed: " + e.getMessage());
+            }
+            try {
+                encoder.release();
+            } catch (Exception e) {
+                Log.e("ENCODER", "Release failed: " + e.getMessage());
+            }
+
+            runOnUiThread(() -> btnStream.setText("Start"));
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -194,6 +180,82 @@ private void startStreaming() {
     streamingThread.start();
 }
 
+    private void setupEncoder() {
+        try {
+            String codecName = null;
+            int adjustedWidth = screenWidth;
+            int adjustedHeight = screenHeight;
+
+            MediaCodecInfo[] codecs = new MediaCodecList(MediaCodecList.ALL_CODECS).getCodecInfos();
+            for (MediaCodecInfo codecInfo : codecs) {
+                if (!codecInfo.isEncoder()) continue;
+                if (!codecInfo.getName().toLowerCase().contains("avc")) continue;
+
+                MediaCodecInfo.CodecCapabilities caps = codecInfo.getCapabilitiesForType("video/avc");
+                if (caps == null) continue;
+
+                MediaCodecInfo.VideoCapabilities videoCaps = caps.getVideoCapabilities();
+                Range<Integer> widthRange = videoCaps.getSupportedWidths();
+                Range<Integer> heightRange = videoCaps.getSupportedHeights();
+
+                if (screenWidth < widthRange.getLower() || screenWidth > widthRange.getUpper()) {
+                    adjustedWidth = Math.min(Math.max(screenWidth, widthRange.getLower()), widthRange.getUpper());
+                }
+                if (screenHeight < heightRange.getLower() || screenHeight > heightRange.getUpper()) {
+                    adjustedHeight = Math.min(Math.max(screenHeight, heightRange.getLower()), heightRange.getUpper());
+                }
+
+                for (int fmt : caps.colorFormats) {
+                    if (fmt == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) {
+                        codecName = codecInfo.getName();
+                        break;
+                    }
+                }
+
+                if (codecName != null) break;
+            }
+
+            if (codecName == null) throw new RuntimeException("Uygun AVC codec bulunamadı");
+
+            MediaFormat format = MediaFormat.createVideoFormat("video/avc", adjustedWidth, adjustedHeight);
+            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+            format.setInteger(MediaFormat.KEY_BIT_RATE, adjustedWidth * adjustedHeight * 4);
+            format.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
+            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+            format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileMain);
+            format.setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31);
+
+            
+
+            encoder = MediaCodec.createByCodecName(codecName);
+            encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            inputSurface = encoder.createInputSurface();
+            encoder.start();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void send(OutputStream out, ByteBuffer buf) throws Exception {
+        if (buf == null) return;
+        buf.position(0);
+        byte[] data = new byte[buf.remaining()];
+        buf.get(data);
+        out.write(intToByteArray(data.length));
+        out.write(data);
+        out.flush();
+    }
+
+    private void send(OutputStream out, ByteBuffer buf, int size) throws Exception {
+        if (buf == null || size <= 0) return;
+        buf.position(0);
+        byte[] data = new byte[size];
+        buf.get(data, 0, size);
+        out.write(intToByteArray(size));
+        out.write(data);
+        out.flush();
+    }
+
     private byte[] intToByteArray(int value) {
         return new byte[]{
                 (byte)(value >> 24),
@@ -205,7 +267,7 @@ private void startStreaming() {
 
     private void stopStreaming() {
         streaming = false;
-        btnStream.setText("Start");
+        runOnUiThread(() -> btnStream.setText("Start"));
         if (mediaProjection != null) {
             mediaProjection.stop();
             mediaProjection = null;
