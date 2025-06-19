@@ -18,6 +18,8 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.Toast;
 import android.hardware.display.VirtualDisplay;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
@@ -26,8 +28,6 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 
 public class MainActivity extends AppCompatActivity {
-
-    private static final int REQUEST_CODE = 1000;
 
     private MediaProjectionManager projectionManager;
     private MediaProjection mediaProjection;
@@ -48,6 +48,8 @@ public class MainActivity extends AppCompatActivity {
     private EditText editIP, editPort;
     private Button btnStream;
 
+    private ActivityResultLauncher<Intent> projectionLauncher;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -63,6 +65,21 @@ public class MainActivity extends AppCompatActivity {
         screenHeight = metrics.heightPixels;
 
         projectionManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+
+        projectionLauncher = registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(),
+                result -> {
+                    if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
+                        mediaProjection = projectionManager.getMediaProjection(result.getResultCode(), result.getData());
+                        setupEncoder();
+                        setUpVirtualDisplay();
+                        startStreaming();
+                        btnStream.setText("Stop");
+                        streaming = true;
+                    } else {
+                        Toast.makeText(this, "Screen Cast Permission Denied", Toast.LENGTH_SHORT).show();
+                    }
+                });
 
         btnStream.setOnClickListener(v -> {
             if (!streaming) {
@@ -80,37 +97,16 @@ public class MainActivity extends AppCompatActivity {
                 Intent serviceIntent = new Intent(this, ScreenCaptureService.class);
                 ContextCompat.startForegroundService(this, serviceIntent);
 
-                startProjection();
+                if (mediaProjection != null) {
+                    stopStreaming();
+                }
 
+                Intent intent = projectionManager.createScreenCaptureIntent();
+                projectionLauncher.launch(intent);
             } else {
                 stopStreaming();
             }
         });
-    }
-
-    private void startProjection() {
-        if (mediaProjection != null) {
-            stopStreaming();
-        }
-        Intent intent = projectionManager.createScreenCaptureIntent();
-        startActivityForResult(intent, REQUEST_CODE);
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_CODE) {
-            if (resultCode == Activity.RESULT_OK && data != null) {
-                mediaProjection = projectionManager.getMediaProjection(resultCode, data);
-                setupEncoder();
-                setUpVirtualDisplay();
-                startStreaming();
-                btnStream.setText("Stop");
-                streaming = true;
-            } else {
-                Toast.makeText(this, "Screen Cast Permission Denied", Toast.LENGTH_SHORT).show();
-            }
-        }
     }
 
     private void setUpVirtualDisplay() {
