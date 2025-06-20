@@ -26,6 +26,9 @@ import androidx.core.content.ContextCompat;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
+import android.os.Handler;
+import android.os.Looper;
+
 
 public class MainActivity extends AppCompatActivity {
 
@@ -72,6 +75,15 @@ public class MainActivity extends AppCompatActivity {
                     if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
                         mediaProjection = projectionManager.getMediaProjection(result.getResultCode(), result.getData());
                         setupEncoder();
+                        
+                        mediaProjection.registerCallback(new MediaProjection.Callback() {
+                                @Override
+                                public void onStop() {
+                                    stopStreaming();
+                                    Log.i("ScreenCapture", "MediaProjection stopped.");
+                                }
+                            }, new Handler(Looper.getMainLooper()));
+
                         setUpVirtualDisplay();
                         startStreaming();
                         btnStream.setText("Stop");

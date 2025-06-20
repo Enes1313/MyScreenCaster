@@ -2,11 +2,11 @@ apply plugin: 'com.android.application'
 
 android {
     namespace = 'com.example.myscreencaster'
-    compileSdkVersion = 33
+    compileSdkVersion = 34
     defaultConfig {
         applicationId = "com.example.myscreencaster"
-        minSdkVersion = 21
-        targetSdkVersion = 33
+        minSdkVersion = 22
+        targetSdkVersion = 34
         versionCode = 1
         versionName = "1.0"
 
